@@ -4,8 +4,11 @@ Seeds a Sentry project with various issue types (exceptions and messages) for te
 
 ## Setup
 
+Use `python3` if your system doesn’t provide a `python` command (e.g. some Linux distros).
+
 ```bash
 python -m venv .venv
+# or: python3 -m venv .venv
 source .venv/bin/activate   # or `.venv\Scripts\activate` on Windows
 pip install -r requirements.txt
 ```
@@ -23,6 +26,7 @@ Using the project DSN is the most reliable option and does not require API permi
 ```bash
 export SENTRY_DSN="https://YOUR_KEY@oXXXX.ingest.sentry.io/PROJECT_ID"
 python seed_sentry_issues.py
+# or: python3 seed_sentry_issues.py
 ```
 
 ### Option 2: Use auth token (API)
@@ -32,6 +36,7 @@ If your token has **project:read** (or similar) permission, the script can fetch
 ```bash
 export SENTRY_AUTH_TOKEN="sntrys_..."
 python seed_sentry_issues.py
+# or: python3 seed_sentry_issues.py
 ```
 
 If you get `403 You do not have permission to perform this action`, use **Option 1** (DSN) instead.
