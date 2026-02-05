@@ -21,11 +21,25 @@ Usage:
 import base64
 import json
 import os
+import random
+import string
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 import sentry_sdk
+
+
+def _random_values() -> dict[str, Any]:
+    """Generate random values to verify Sentry captures variable/extra data."""
+    return {
+        "request_id": f"req_{random.randint(10000, 99999)}",
+        "user_id": random.randint(1000, 99999),
+        "amount_cents": random.randint(1, 99999),
+        "api_token_suffix": "".join(random.choices(string.ascii_letters + string.digits, k=12)),
+        "correlation_id": f"{random.getrandbits(32):08x}",
+        "session_id": f"sess_{random.getrandbits(48):012x}",
+    }
 
 
 def decode_sentry_token(token: str) -> dict:
@@ -175,6 +189,47 @@ def seed_issues(dsn: str) -> None:
             raise RuntimeError("Seed: Payment gateway timeout")
         except RuntimeError:
             sentry_sdk.capture_exception()
+
+    # --- Random values: check in Sentry whether variables show under "Additional Data" and stack "Local Variables" ---
+    rv = _random_values()
+
+    def _fail_with_locals(
+        request_id: str,
+        user_id: int,
+        amount_cents: int,
+        api_token_suffix: str,
+        correlation_id: str,
+        session_id: str,
+    ) -> None:
+        # These args and locals may appear as "Local Variables" in the event stack frame in Sentry.
+        payload = {
+            "amount": amount_cents,
+            "currency": "USD",
+            "correlation_id": correlation_id,
+            "session_id": session_id,
+            "api_token_suffix": api_token_suffix,
+        }
+        raise ValueError(
+            f"Seed: Charge failed for request {request_id} (user={user_id}, amount={amount_cents}, payload={payload})"
+        )
+
+    with sentry_sdk.configure_scope() as scope:
+        for key, value in rv.items():
+            scope.set_extra(f"random_{key}", value)
+        scope.set_tag("seed_random", "true")
+        try:
+            _fail_with_locals(
+                request_id=rv["request_id"],
+                user_id=rv["user_id"],
+                amount_cents=rv["amount_cents"],
+                api_token_suffix=rv["api_token_suffix"],
+                correlation_id=rv["correlation_id"],
+                session_id=rv["session_id"],
+            )
+        except ValueError:
+            sentry_sdk.capture_exception()
+
+    print("Random values sent (check in Sentry: Additional Data + stack Local Variables):", rv)
 
     # --- Chained exception (Python 3) ---
     try:
