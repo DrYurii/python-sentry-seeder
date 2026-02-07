@@ -46,10 +46,28 @@ Optional env vars when using the token:
 - **SENTRY_PROJECT** – project slug to target (default: first project in the org)
 - **SENTRY_ORG** – org slug (default: decoded from token)
 
+### Bulk seeding (default: 100 issues, 5 events per issue)
+
+In Sentry, **events** with the same [fingerprint](https://docs.sentry.io/product/issues/grouping-and-fingerprints) are grouped into one **issue**. By default the script creates **100 issues** per run; each issue gets **5 events** that share one fingerprint, so each issue shows multiple events. Each run uses a new run ID so new issues are created (previous issues are not overwritten). Issues have mixed **priorities** (High / Medium / Low) based on event level ([docs](https://docs.sentry.io/product/issues/issue-priority)): `error`/`fatal` → High, `warning` → Medium, `info`/`debug` → Low.
+
+```bash
+export SENTRY_DSN="https://..."
+python seed_sentry_issues.py
+# Run again to add another 100 issues (each with 5 events):
+python seed_sentry_issues.py
+```
+
+- **SEED_COUNT** – number of issues to create per run (default: `100`). Use `SEED_COUNT=0` for the one-off “variety” seed only.
+- **SEED_EVENTS_PER_ISSUE** – number of events to send per issue (default: `5`). All share the same fingerprint so they group into one issue.
+
+```bash
+SEED_COUNT=20 SEED_EVENTS_PER_ISSUE=10 python seed_sentry_issues.py
+SEED_COUNT=0 python seed_sentry_issues.py   # variety seed only
+```
+
 ## What gets sent
 
-- Messages at different levels: info, warning, error, fatal, debug
-- Exceptions: `ValueError`, `TypeError`, `KeyError`, `RuntimeError`, `ZeroDivisionError`, `FileNotFoundError`, `ConnectionError`, `PermissionError`, `OSError`, `AssertionError`, `IndexError`, `AttributeError`
-- One event with breadcrumbs and one with extra context/tags
+- **Bulk mode (default):** Each run creates `SEED_COUNT` **issues**. Each issue gets `SEED_EVENTS_PER_ISSUE` **events** with the same fingerprint (so they appear as one issue with multiple events). Issue kinds vary by exception type (ValueError, RuntimeError, KeyError, etc.) and **priority** (High/Medium/Low via event level). Run again to add more issues.
+- **Variety mode (SEED_COUNT=0):** One-off set of messages (info/warning/error/fatal/debug), mixed exception types, breadcrumbs, and extra context/tags.
 
-After running, check your Sentry project for the new issues.
+After running, check your Sentry project: each issue’s detail page shows multiple events, and the Issues stream shows mixed priorities.

@@ -16,6 +16,11 @@ Usage:
   # Optional: target a specific project by slug
   export SENTRY_PROJECT="my-project"
   python seed_sentry_issues.py
+
+  # Seed 100 issues per run, 5 events per issue (events grouped by fingerprint; mixed priority):
+  export SENTRY_DSN="..."
+  SEED_COUNT=100 python seed_sentry_issues.py
+  SEED_EVENTS_PER_ISSUE=10 python seed_sentry_issues.py
 """
 
 import base64
@@ -24,6 +29,7 @@ import os
 import random
 import string
 import sys
+import uuid
 from typing import Any, Optional
 
 import requests
@@ -262,6 +268,81 @@ def seed_issues(dsn: str) -> None:
     print("Seeding complete. Check your Sentry project for the new issues.")
 
 
+# Issue kinds for bulk seeding: (fingerprint_key, exc_type, message_template, level).
+# Events with the same fingerprint group into one Issue. Level sets priority: error/fatal=High, warning=Medium, info/debug=Low.
+# See: https://docs.sentry.io/product/issues/grouping-and-fingerprints
+# See: https://docs.sentry.io/product/issues/issue-priority
+_ISSUE_KINDS: list[tuple[str, type[Exception], str, str]] = [
+    # High priority (error/fatal)
+    ("validation-error", ValueError, "Validation failed for request {request_id}", "error"),
+    ("service-timeout", RuntimeError, "Service timeout for session {session_id}", "error"),
+    ("connection-refused", ConnectionError, "Database connection refused (correlation_id={correlation_id})", "error"),
+    ("permission-denied", PermissionError, "Access denied to resource for user {user_id}", "error"),
+    ("fatal-crash", RuntimeError, "Fatal: unrecoverable state (request_id={request_id})", "fatal"),
+    # Medium priority (warning)
+    ("config-missing", KeyError, "Missing config key in payload", "warning"),
+    ("type-mismatch", TypeError, "Unexpected type for user_id={user_id}", "warning"),
+    ("deprecation", RuntimeError, "Deprecated API used at session {session_id}", "warning"),
+    ("rate-limit", RuntimeError, "Rate limit approached for user {user_id}", "warning"),
+    # Low priority (info/debug)
+    ("audit-info", ValueError, "Audit: validation skipped for request {request_id}", "info"),
+    ("debug-trace", AssertionError, "Debug assertion: amount_cents={amount_cents}", "debug"),
+    ("file-missing", FileNotFoundError, "Optional config file not found", "info"),
+]
+
+
+def _raise_bulk_exception(exc_cls: type[Exception], message: str) -> None:
+    """Raise an exception so we can capture it. FileNotFoundError has a different signature."""
+    if exc_cls is FileNotFoundError:
+        raise FileNotFoundError(2, message, f"/tmp/seed-{random.getrandbits(16)}.txt")
+    raise exc_cls(message)
+
+
+def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int) -> None:
+    """Send `issue_count` issues; each issue gets `events_per_issue` events that share one fingerprint (grouped).
+    Uses a new run_id per run so each run creates new issues. Different issue kinds have different levels (priority)."""
+    sentry_sdk.init(
+        dsn=dsn,
+        environment="seed-script",
+        traces_sample_rate=0,
+    )
+    run_id = str(uuid.uuid4())
+    kinds = _ISSUE_KINDS
+    total_events = 0
+    for issue_idx in range(issue_count):
+        kind_key, exc_cls, msg_tpl, level = kinds[issue_idx % len(kinds)]
+        # Same fingerprint for all events in this issue → they group into one Issue (see Sentry grouping docs).
+        fingerprint = ["seed-group", run_id, kind_key]
+        for event_idx in range(events_per_issue):
+            rv = _random_values()
+            try:
+                message = msg_tpl.format(**rv)
+            except KeyError:
+                message = msg_tpl
+            with sentry_sdk.configure_scope() as scope:
+                scope.fingerprint = fingerprint
+                scope.set_level(level)
+                for key, value in rv.items():
+                    scope.set_extra(f"random_{key}", value)
+                scope.set_extra("event_index", event_idx + 1)
+                scope.set_extra("events_per_issue", events_per_issue)
+                scope.set_tag("seed_bulk", "true")
+                scope.set_tag("issue_kind", kind_key)
+                scope.set_tag("priority", level)
+                try:
+                    _raise_bulk_exception(exc_cls, message)
+                except Exception:
+                    sentry_sdk.capture_exception()
+            total_events += 1
+        if (issue_idx + 1) % 5 == 0 or issue_idx == 0:
+            print(f"  Issue {issue_idx + 1}/{issue_count} ({events_per_issue} events each)...")
+    sentry_sdk.flush(timeout=15)
+    print(
+        f"Seeding complete. {issue_count} issues created ({total_events} events total, "
+        f"{events_per_issue} events per issue). Run again to add more issues."
+    )
+
+
 def main() -> None:
     dsn = os.environ.get("SENTRY_DSN")
     token = os.environ.get("SENTRY_AUTH_TOKEN")
@@ -279,7 +360,23 @@ def main() -> None:
             )
         sys.exit(1)
 
-    seed_issues(dsn)
+    try:
+        seed_count = int(os.environ.get("SEED_COUNT", "100"))
+    except ValueError:
+        seed_count = 100
+    try:
+        events_per_issue = int(os.environ.get("SEED_EVENTS_PER_ISSUE", "5"))
+    except ValueError:
+        events_per_issue = 5
+
+    if seed_count > 0:
+        print(
+            f"Bulk seeding {seed_count} issues ({events_per_issue} events per issue, "
+            "grouped by fingerprint; mixed priorities)..."
+        )
+        seed_bulk_issues(dsn, seed_count, events_per_issue)
+    else:
+        seed_issues(dsn)
 
 
 if __name__ == "__main__":
