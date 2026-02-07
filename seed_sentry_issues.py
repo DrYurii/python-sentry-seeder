@@ -21,12 +21,17 @@ Usage:
   export SENTRY_DSN="..."
   SEED_COUNT=100 python seed_sentry_issues.py
   SEED_EVENTS_PER_ISSUE=10 python seed_sentry_issues.py
+
+  # 3 releases per run (package@version, see docs/features/releases.md). Override base:
+  SENTRY_RELEASE="seed-script@2.0.0" python seed_sentry_issues.py
 """
 
 import base64
+import contextvars
 import json
 import os
 import random
+import re
 import string
 import sys
 import uuid
@@ -34,6 +39,9 @@ from typing import Any, Optional
 
 import requests
 import sentry_sdk
+
+# Per-event release override (see docs/features/releases.md). Set before capture so before_send can attach it.
+_current_release: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_release", default=None)
 
 
 def _random_values() -> dict[str, Any]:
@@ -121,61 +129,95 @@ def get_dsn_from_api(token: str, org_slug: Optional[str] = None, project_slug: O
     return dsn
 
 
-def seed_issues(dsn: str) -> None:
-    """Send a variety of events to Sentry to create sample issues."""
+def _get_releases() -> list[str]:
+    """Return 3 release names (package@version) per run. See docs/features/releases.md.
+    Format: package@version (semver); shortVersion in UI is the part after @.
+    Override base via SENTRY_RELEASE (e.g. seed-script@1.0.0) to derive 3 versions."""
+    base = (os.environ.get("SENTRY_RELEASE") or "seed-script@1.0.0").strip() or "seed-script@1.0.0"
+    match = re.match(r"^(.+@)(\d+)\.(\d+)\.(\d+)$", base)
+    if match:
+        prefix, major, minor, patch = match.group(1), int(match.group(2)), int(match.group(3)), int(match.group(4))
+        return [f"{prefix}{major}.{minor}.{patch}", f"{prefix}{major}.{minor + 1}.0", f"{prefix}{major + 1}.0.0"]
+    # Fallback: non-semver base, append suffixes
+    return [f"{base}-a", f"{base}-b", f"{base}-c"]
+
+
+def _before_send_set_release(event: dict, hint: dict) -> dict | None:
+    """Set event release from per-event override (3 releases per run)."""
+    release = _current_release.get()
+    if release:
+        event["release"] = release
+    return event
+
+
+def _set_release_and_capture(releases: list[str], event_idx: list[int], level: str | None, message: str | None = None) -> None:
+    """Set current release (round-robin across 3) then capture; for variety seed."""
+    _current_release.set(releases[event_idx[0] % 3])
+    event_idx[0] += 1
+    if message is not None:
+        sentry_sdk.capture_message(message, level=level or "info")
+    else:
+        sentry_sdk.capture_exception()
+
+
+def seed_issues(dsn: str, releases: list[str]) -> None:
+    """Send a variety of events to Sentry to create sample issues. Events distributed across 3 releases."""
     sentry_sdk.init(
         dsn=dsn,
+        release=releases[0],
         environment="seed-script",
         traces_sample_rate=0,
+        before_send=_before_send_set_release,
     )
+    ev = [0]
 
     # --- Messages (different levels) ---
-    sentry_sdk.capture_message("Seed: Info message", level="info")
-    sentry_sdk.capture_message("Seed: Warning message", level="warning")
-    sentry_sdk.capture_message("Seed: Error message", level="error")
-    sentry_sdk.capture_message("Seed: Fatal message", level="fatal")
-    sentry_sdk.capture_message("Seed: Debug message", level="debug")
+    _set_release_and_capture(releases, ev, "info", "Seed: Info message")
+    _set_release_and_capture(releases, ev, "warning", "Seed: Warning message")
+    _set_release_and_capture(releases, ev, "error", "Seed: Error message")
+    _set_release_and_capture(releases, ev, "fatal", "Seed: Fatal message")
+    _set_release_and_capture(releases, ev, "debug", "Seed: Debug message")
 
     # --- Exceptions ---
     try:
         raise ValueError("Seed: Invalid value for user_id")
     except ValueError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     try:
         raise TypeError("Seed: expected str, got int")
     except TypeError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     try:
         raise KeyError("Seed: missing key 'config'")
     except KeyError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     try:
         raise RuntimeError("Seed: service unavailable")
     except RuntimeError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     try:
         _ = 1 / 0
     except ZeroDivisionError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     try:
         raise FileNotFoundError(2, "No such file", "/tmp/seed-missing.txt")
     except FileNotFoundError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     try:
         raise ConnectionError("Seed: failed to connect to database")
     except ConnectionError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     try:
         raise PermissionError(13, "Permission denied", "/etc/shadow")
     except PermissionError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     # --- With breadcrumbs ---
     sentry_sdk.add_breadcrumb(category="auth", message="User login attempt", level="info")
@@ -183,7 +225,7 @@ def seed_issues(dsn: str) -> None:
     try:
         raise ValueError("Seed: Auth failed after login attempt")
     except ValueError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     # --- With extra context ---
     with sentry_sdk.configure_scope() as scope:
@@ -194,7 +236,7 @@ def seed_issues(dsn: str) -> None:
         try:
             raise RuntimeError("Seed: Payment gateway timeout")
         except RuntimeError:
-            sentry_sdk.capture_exception()
+            _set_release_and_capture(releases, ev, None)
 
     # --- Random values: check in Sentry whether variables show under "Additional Data" and stack "Local Variables" ---
     rv = _random_values()
@@ -233,7 +275,7 @@ def seed_issues(dsn: str) -> None:
                 session_id=rv["session_id"],
             )
         except ValueError:
-            sentry_sdk.capture_exception()
+            _set_release_and_capture(releases, ev, None)
 
     print("Random values sent (check in Sentry: Additional Data + stack Local Variables):", rv)
 
@@ -244,25 +286,25 @@ def seed_issues(dsn: str) -> None:
         except OSError as e:
             raise RuntimeError("Seed: Wrapper error") from e
     except RuntimeError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     # --- AssertionError ---
     try:
         assert False, "Seed: Assertion failed in validation"
     except AssertionError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     # --- IndexError ---
     try:
         [1, 2, 3][10]
     except IndexError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     # --- AttributeError ---
     try:
         (None).missing_attr
     except AttributeError:
-        sentry_sdk.capture_exception()
+        _set_release_and_capture(releases, ev, None)
 
     sentry_sdk.flush(timeout=5)
     print("Seeding complete. Check your Sentry project for the new issues.")
@@ -298,22 +340,27 @@ def _raise_bulk_exception(exc_cls: type[Exception], message: str) -> None:
     raise exc_cls(message)
 
 
-def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int) -> None:
+def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases: list[str]) -> None:
     """Send `issue_count` issues; each issue gets `events_per_issue` events that share one fingerprint (grouped).
-    Uses a new run_id per run so each run creates new issues. Different issue kinds have different levels (priority)."""
+    Events are distributed across 3 releases (see docs/features/releases.md)."""
     sentry_sdk.init(
         dsn=dsn,
+        release=releases[0],
         environment="seed-script",
         traces_sample_rate=0,
+        before_send=_before_send_set_release,
     )
     run_id = str(uuid.uuid4())
     kinds = _ISSUE_KINDS
     total_events = 0
+    global_event_idx = 0
     for issue_idx in range(issue_count):
         kind_key, exc_cls, msg_tpl, level = kinds[issue_idx % len(kinds)]
         # Same fingerprint for all events in this issue → they group into one Issue (see Sentry grouping docs).
         fingerprint = ["seed-group", run_id, kind_key]
         for event_idx in range(events_per_issue):
+            _current_release.set(releases[global_event_idx % 3])
+            global_event_idx += 1
             rv = _random_values()
             try:
                 message = msg_tpl.format(**rv)
@@ -339,7 +386,7 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int) -> None:
     sentry_sdk.flush(timeout=15)
     print(
         f"Seeding complete. {issue_count} issues created ({total_events} events total, "
-        f"{events_per_issue} events per issue). Run again to add more issues."
+        f"{events_per_issue} events per issue), across 3 releases. Run again to add more issues."
     )
 
 
@@ -369,14 +416,17 @@ def main() -> None:
     except ValueError:
         events_per_issue = 5
 
+    releases = _get_releases()
+    print(f"Using 3 releases: {releases[0]}, {releases[1]}, {releases[2]}")
+
     if seed_count > 0:
         print(
             f"Bulk seeding {seed_count} issues ({events_per_issue} events per issue, "
-            "grouped by fingerprint; mixed priorities)..."
+            "grouped by fingerprint; mixed priorities; events spread across 3 releases)..."
         )
-        seed_bulk_issues(dsn, seed_count, events_per_issue)
+        seed_bulk_issues(dsn, seed_count, events_per_issue, releases)
     else:
-        seed_issues(dsn)
+        seed_issues(dsn, releases)
 
 
 if __name__ == "__main__":

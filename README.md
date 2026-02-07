@@ -59,15 +59,17 @@ python seed_sentry_issues.py
 
 - **SEED_COUNT** – number of issues to create per run (default: `100`). Use `SEED_COUNT=0` for the one-off “variety” seed only.
 - **SEED_EVENTS_PER_ISSUE** – number of events to send per issue (default: `5`). All share the same fingerprint so they group into one issue.
+- **SENTRY_RELEASE** – base for **3 releases** per run (default: `seed-script@1.0.0`). The script derives 3 semantic versions (e.g. `1.0.0`, `1.1.0`, `2.0.0`) and distributes events across them so Sentry shows 3 releases. See `docs/features/releases.md` for naming (`package@version`).
 
 ```bash
 SEED_COUNT=20 SEED_EVENTS_PER_ISSUE=10 python seed_sentry_issues.py
+SENTRY_RELEASE="seed-script@2.0.0" python seed_sentry_issues.py   # releases: 2.0.0, 2.1.0, 3.0.0
 SEED_COUNT=0 python seed_sentry_issues.py   # variety seed only
 ```
 
 ## What gets sent
 
-- **Bulk mode (default):** Each run creates `SEED_COUNT` **issues**. Each issue gets `SEED_EVENTS_PER_ISSUE` **events** with the same fingerprint (so they appear as one issue with multiple events). Issue kinds vary by exception type (ValueError, RuntimeError, KeyError, etc.) and **priority** (High/Medium/Low via event level). Run again to add more issues.
-- **Variety mode (SEED_COUNT=0):** One-off set of messages (info/warning/error/fatal/debug), mixed exception types, breadcrumbs, and extra context/tags.
+- **Bulk mode (default):** Each run creates `SEED_COUNT` **issues**. Each issue gets `SEED_EVENTS_PER_ISSUE` **events** with the same fingerprint (so they appear as one issue with multiple events). Events are spread across **3 releases** per run (semantic versions derived from `SENTRY_RELEASE`). Issue kinds vary by exception type and **priority** (High/Medium/Low). Run again to add more issues.
+- **Variety mode (SEED_COUNT=0):** One-off set of messages and exceptions, distributed across the same 3 releases.
 
-After running, check your Sentry project: each issue’s detail page shows multiple events, and the Issues stream shows mixed priorities.
+After running, check your Sentry project: **Releases** lists 3 versions; each issue’s detail page shows multiple events and a release; the Issues stream shows mixed priorities.
