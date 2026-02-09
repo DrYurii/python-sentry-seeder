@@ -374,6 +374,7 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
                 scope.set_extra("event_index", event_idx + 1)
                 scope.set_extra("events_per_issue", events_per_issue)
                 scope.set_tag("seed_bulk", "true")
+                scope.set_tag("seed_run_id", run_id)
                 scope.set_tag("issue_kind", kind_key)
                 scope.set_tag("priority", level)
                 try:

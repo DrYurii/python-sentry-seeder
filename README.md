@@ -67,6 +67,15 @@ SENTRY_RELEASE="seed-script@2.0.0" python seed_sentry_issues.py   # releases: 2.
 SEED_COUNT=0 python seed_sentry_issues.py   # variety seed only
 ```
 
+### Add one FileNotFoundError event
+
+Use `add_events_to_issue.py` to send a **single** event to Sentry: a `FileNotFoundError` with message “Optional config file not found” and path `/tmp/seed-13031.txt` (stack: `__main__` in `_raise_bulk_exception`). No auth token or API—only the DSN is required. Useful to add another event to an existing issue that matches that description (Sentry will group it by the same fingerprint).
+
+```bash
+export SENTRY_DSN="https://...@....ingest.sentry.io/..."
+python3 add_events_to_issue.py
+```
+
 ## What gets sent
 
 - **Bulk mode (default):** Each run creates `SEED_COUNT` **issues**. Each issue gets `SEED_EVENTS_PER_ISSUE` **events** with the same fingerprint (so they appear as one issue with multiple events). Events are spread across **3 releases** per run (semantic versions derived from `SENTRY_RELEASE`). Issue kinds vary by exception type and **priority** (High/Medium/Low). Run again to add more issues.
