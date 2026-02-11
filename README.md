@@ -67,6 +67,21 @@ SENTRY_RELEASE="seed-script@2.0.0" python seed_sentry_issues.py   # releases: 2.
 SEED_COUNT=0 python seed_sentry_issues.py   # variety seed only
 ```
 
+### Create a release
+
+Use `create_sentry_release.py` to create a **release** in Sentry via the API (e.g. so events can be associated with a version). Requires **SENTRY_AUTH_TOKEN** with scope **project:releases**.
+
+```bash
+export SENTRY_AUTH_TOKEN="sntrys_..."
+python3 create_sentry_release.py
+```
+
+- **SENTRY_RELEASE** – release version (default: `seed-script@1.0.0`). Must be unique per organization.
+- **SENTRY_ORG** – org slug (optional; default from token).
+- **SENTRY_PROJECT** – project slug to attach the release to (optional; default: first project in the org).
+
+If the version already exists, the API returns 409.
+
 ### Add one FileNotFoundError event
 
 Use `add_events_to_issue.py` to send a **single** event to Sentry: a `FileNotFoundError` with message “Optional config file not found” and path `/tmp/seed-13031.txt` (stack: `__main__` in `_raise_bulk_exception`). No auth token or API—only the DSN is required. Useful to add another event to an existing issue that matches that description (Sentry will group it by the same fingerprint).
