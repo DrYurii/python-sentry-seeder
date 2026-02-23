@@ -178,9 +178,9 @@ def seed_issues(dsn: str, releases: list[str]) -> None:
     _set_release_and_capture(releases, ev, "fatal", "Seed: Fatal message")
     _set_release_and_capture(releases, ev, "debug", "Seed: Debug message")
 
-    # --- Exceptions ---
+    # --- Exceptions (with deep stack: up to 10 frames for Sentry Issue Details) ---
     try:
-        raise ValueError("Seed: Invalid value for user_id")
+        _seed_stack_0(ValueError, "Seed: Invalid value for user_id")
     except ValueError:
         _set_release_and_capture(releases, ev, None)
 
@@ -340,6 +340,47 @@ def _raise_bulk_exception(exc_cls: type[Exception], message: str) -> None:
     raise exc_cls(message)
 
 
+# Call chain to produce a stack trace with up to 10 frames (Sentry Issue Details stack trace).
+def _seed_stack_9(exc_cls: type[Exception], message: str) -> None:
+    _raise_bulk_exception(exc_cls, message)
+
+
+def _seed_stack_8(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_9(exc_cls, message)
+
+
+def _seed_stack_7(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_8(exc_cls, message)
+
+
+def _seed_stack_6(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_7(exc_cls, message)
+
+
+def _seed_stack_5(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_6(exc_cls, message)
+
+
+def _seed_stack_4(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_5(exc_cls, message)
+
+
+def _seed_stack_3(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_4(exc_cls, message)
+
+
+def _seed_stack_2(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_3(exc_cls, message)
+
+
+def _seed_stack_1(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_2(exc_cls, message)
+
+
+def _seed_stack_0(exc_cls: type[Exception], message: str) -> None:
+    _seed_stack_1(exc_cls, message)
+
+
 def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases: list[str]) -> None:
     """Send `issue_count` issues; each issue gets `events_per_issue` events that share one fingerprint (grouped).
     Events are distributed across 3 releases (see docs/features/releases.md)."""
@@ -378,7 +419,7 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
                 scope.set_tag("issue_kind", kind_key)
                 scope.set_tag("priority", level)
                 try:
-                    _raise_bulk_exception(exc_cls, message)
+                    _seed_stack_0(exc_cls, message)
                 except Exception:
                     sentry_sdk.capture_exception()
             total_events += 1
