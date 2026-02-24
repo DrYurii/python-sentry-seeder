@@ -60,10 +60,14 @@ python seed_sentry_issues.py
 - **SEED_COUNT** – number of issues to create per run (default: `100`). Use `SEED_COUNT=0` for the one-off “variety” seed only.
 - **SEED_EVENTS_PER_ISSUE** – number of events to send per issue (default: `5`). All share the same fingerprint so they group into one issue.
 - **SENTRY_RELEASE** – base for **3 releases** per run (default: `seed-script@1.0.0`). The script derives 3 semantic versions (e.g. `1.0.0`, `1.1.0`, `2.0.0`) and distributes events across them so Sentry shows 3 releases. See `docs/features/releases.md` for naming (`package@version`).
+- **SENTRY_SEED_ENVIRONMENTS** – comma-separated list of environment names (default: `production`, `staging`, `development`). Events are spread across these so you can filter by environment in Sentry.
+- **SENTRY_TRACES_SAMPLE_RATE** – sampling rate for [tracing](https://docs.sentry.io/concepts/key-terms/tracing/) (default: `1.0`). Each seeded event is sent inside a **transaction** with child **spans** (validate, load, process, execute) so you get trace data and can open **Trace View** from an issue. Set to `0` to disable trace data.
 
 ```bash
 SEED_COUNT=20 SEED_EVENTS_PER_ISSUE=10 python seed_sentry_issues.py
 SENTRY_RELEASE="seed-script@2.0.0" python seed_sentry_issues.py   # releases: 2.0.0, 2.1.0, 3.0.0
+SENTRY_SEED_ENVIRONMENTS="production,staging,development,preview" python seed_sentry_issues.py
+SENTRY_TRACES_SAMPLE_RATE=0 python seed_sentry_issues.py   # no trace data
 SEED_COUNT=0 python seed_sentry_issues.py   # variety seed only
 ```
 
@@ -93,7 +97,8 @@ python3 add_events_to_issue.py
 
 ## What gets sent
 
-- **Bulk mode (default):** Each run creates `SEED_COUNT` **issues**. Each issue gets `SEED_EVENTS_PER_ISSUE` **events** with the same fingerprint (so they appear as one issue with multiple events). Events are spread across **3 releases** per run (semantic versions derived from `SENTRY_RELEASE`). Issue kinds vary by exception type and **priority** (High/Medium/Low). Run again to add more issues.
+- **Bulk mode (default):** Each run creates `SEED_COUNT` **issues**. Each issue gets `SEED_EVENTS_PER_ISSUE` **events** with the same fingerprint (so they appear as one issue with multiple events). Events are spread across **3 releases** and **3 environments** (production, staging, development) per run. Issue kinds vary by exception type and **priority** (High/Medium/Low). Run again to add more issues.
 - **Variety mode (SEED_COUNT=0):** One-off set of messages and exceptions, distributed across the same 3 releases.
+- **Tracing:** Each event is sent inside a **transaction** (op `seed.task`) with four **spans** (validate, load, process, execute). Error events are linked to their trace so you can open [Trace View](https://docs.sentry.io/concepts/key-terms/tracing/trace-view/) from the issue and see the span waterfall.
 
-After running, check your Sentry project: **Releases** lists 3 versions; each issue’s detail page shows multiple events and a release; the Issues stream shows mixed priorities.
+After running, check your Sentry project: **Releases** lists 3 versions; each issue’s detail page shows multiple events, a release, and (if tracing is on) a link to the trace; the **Traces** page lists seed transactions and their spans.
