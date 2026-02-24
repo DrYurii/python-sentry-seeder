@@ -61,7 +61,9 @@ python seed_sentry_issues.py
 - **SEED_EVENTS_PER_ISSUE** – number of events to send per issue (default: `5`). All share the same fingerprint so they group into one issue.
 - **SENTRY_RELEASE** – base for **3 releases** per run (default: `seed-script@1.0.0`). The script derives 3 semantic versions (e.g. `1.0.0`, `1.1.0`, `2.0.0`) and distributes events across them so Sentry shows 3 releases. See `docs/features/releases.md` for naming (`package@version`).
 - **SENTRY_SEED_ENVIRONMENTS** – comma-separated list of environment names (default: `production`, `staging`, `development`). Events are spread across these so you can filter by environment in Sentry.
-- **SENTRY_TRACES_SAMPLE_RATE** – sampling rate for [tracing](https://docs.sentry.io/concepts/key-terms/tracing/) (default: `1.0`). Each seeded event is sent inside a **transaction** with child **spans** (validate, load, process, execute) so you get trace data and can open **Trace View** from an issue. Set to `0` to disable trace data.
+- **SENTRY_TRACES_SAMPLE_RATE** – sampling rate for [tracing](https://docs.sentry.io/concepts/key-terms/tracing/) (default: `1.0`). Each seeded event is sent inside a **transaction** with child **spans** so you get trace data and can open **Trace View** from an issue. Set to `0` to disable trace data.
+
+Seeded runs also send **structured logs** to [Sentry Logs](https://docs.sentry.io/platforms/python/logs/) (trace, debug, info, warning, error) with queryable attributes (`seed_run_id`, `issue_kind`, `request_id`, etc.). Requires **sentry-sdk>=2.35.0** (see `requirements.txt`). **Where to see logs:** In Sentry, go to **Explore → Logs** (or your project’s **Logs** in the sidebar). Search by e.g. `seed_run_id` or message text. If you don’t see logs, run `pip install 'sentry-sdk>=2.35.0'` and re-run the script; the script prints “Sentry Logs: enabled” when logs will be sent.
 
 ```bash
 SEED_COUNT=20 SEED_EVENTS_PER_ISSUE=10 python seed_sentry_issues.py
@@ -99,6 +101,7 @@ python3 add_events_to_issue.py
 
 - **Bulk mode (default):** Each run creates `SEED_COUNT` **issues**. Each issue gets `SEED_EVENTS_PER_ISSUE` **events** with the same fingerprint (so they appear as one issue with multiple events). Events are spread across **3 releases** and **3 environments** (production, staging, development) per run. Issue kinds vary by exception type and **priority** (High/Medium/Low). Run again to add more issues.
 - **Variety mode (SEED_COUNT=0):** One-off set of messages and exceptions, distributed across the same 3 releases.
-- **Tracing:** Each event is sent inside a **transaction** (op `seed.task`) with four **spans** (validate, load, process, execute). Error events are linked to their trace so you can open [Trace View](https://docs.sentry.io/concepts/key-terms/tracing/trace-view/) from the issue and see the span waterfall.
+- **Tracing:** Each event is sent inside a **transaction** (op `seed.task`) with 10 **spans**. Error events are linked to their trace so you can open [Trace View](https://docs.sentry.io/concepts/key-terms/tracing/trace-view/) from the issue.
+- **Logs:** Structured logs (trace, debug, info, warning, error) are sent with attributes like `seed_run_id`, `issue_kind`, `request_id`, `session_id` so you can search and filter in the Logs UI.
 
 After running, check your Sentry project: **Releases** lists 3 versions; each issue’s detail page shows multiple events, a release, and (if tracing is on) a link to the trace; the **Traces** page lists seed transactions and their spans.

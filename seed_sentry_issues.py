@@ -30,6 +30,8 @@ Usage:
 
   # Trace data (transaction + spans) is sent by default so issues link to Trace View. Disable with:
   SENTRY_TRACES_SAMPLE_RATE=0 python seed_sentry_issues.py
+
+  # Structured logs are sent to Sentry Logs (enable_logs=True). Requires sentry-sdk>=2.35.0.
 """
 
 import base64
@@ -47,6 +49,41 @@ from typing import Any, Optional
 
 import requests
 import sentry_sdk
+
+# Structured logs (Sentry Logs). Requires sentry-sdk>=2.35.0. See https://docs.sentry.io/platforms/python/logs
+# Import from the logger submodule (sentry_sdk.logger) since the package may not expose it as an attribute.
+try:
+    from sentry_sdk.logger import (  # type: ignore[attr-defined]
+        trace as _log_trace,
+        debug as _log_debug,
+        info as _log_info,
+        warning as _log_warning,
+        error as _log_error,
+        fatal as _log_fatal,
+    )
+
+    class _SentryLogger:
+        trace = staticmethod(_log_trace)
+        debug = staticmethod(_log_debug)
+        info = staticmethod(_log_info)
+        warning = staticmethod(_log_warning)
+        error = staticmethod(_log_error)
+        fatal = staticmethod(_log_fatal)
+
+    _sentry_logger = _SentryLogger()
+    _logs_enabled = True
+except (ImportError, AttributeError):
+    class _NoopLogger:
+        """No-op when sentry_sdk.logger is not available (e.g. SDK < 2.35.0)."""
+
+        def trace(self, msg, **kwargs): pass  # no-op
+        def debug(self, msg, **kwargs): pass  # no-op
+        def info(self, msg, **kwargs): pass  # no-op
+        def warning(self, msg, **kwargs): pass  # no-op
+        def error(self, msg, **kwargs): pass  # no-op
+        def fatal(self, msg, **kwargs): pass  # no-op
+    _sentry_logger = _NoopLogger()
+    _logs_enabled = False
 
 # Per-event release override (see docs/features/releases.md). Set before capture so before_send can attach it.
 _current_release: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_release", default=None)
@@ -231,13 +268,20 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
         environment=environments[0],
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
+        **({"enable_logs": True} if _logs_enabled else {}),
     )
     ev = [0]
 
+    # --- Sentry Logs (structured, queryable). See https://docs.sentry.io/platforms/python/logs ---
+    _sentry_logger.trace("Seed variety run started", attributes={"seed_mode": "variety", "event_count": 0})
+    _sentry_logger.debug("Releases and environments configured", attributes={"release_count": len(releases), "environment_count": len(environments)})
+
     # --- Messages (different levels) ---
     with _seed_transaction("Seed: Info message"):
+        _sentry_logger.info("Seed message: info level")
         _set_release_and_capture(releases, environments, ev, "info", "Seed: Info message")
     with _seed_transaction("Seed: Warning message"):
+        _sentry_logger.warning("Seed message: warning level", attributes={"seed_level": "warning"})
         _set_release_and_capture(releases, environments, ev, "warning", "Seed: Warning message")
     with _seed_transaction("Seed: Error message"):
         _set_release_and_capture(releases, environments, ev, "error", "Seed: Error message")
@@ -340,6 +384,16 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
         )
 
     with _seed_transaction("Seed: Charge failed (random values)"):
+        _sentry_logger.info(
+            "Checkout attempt for request {request_id} user {user_id} amount_cents {amount_cents}",
+            request_id=rv["request_id"],
+            user_id=rv["user_id"],
+            amount_cents=rv["amount_cents"],
+            attributes={
+                "session_id": rv["session_id"],
+                "correlation_id": rv["correlation_id"],
+            },
+        )
         with sentry_sdk.configure_scope() as scope:
             for key, value in rv.items():
                 scope.set_extra(f"random_{key}", value)
@@ -473,8 +527,15 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
         environment=environments[0],
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
+        **({"enable_logs": True} if _logs_enabled else {}),
     )
     run_id = str(uuid.uuid4())
+    _sentry_logger.info(
+        "Seed bulk run started: {issue_count} issues, {events_per_issue} events each",
+        issue_count=issue_count,
+        events_per_issue=events_per_issue,
+        attributes={"seed_run_id": run_id, "seed_mode": "bulk"},
+    )
     kinds = _ISSUE_KINDS
     total_events = 0
     global_event_idx = 0
@@ -492,6 +553,17 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
             except KeyError:
                 message = msg_tpl
             with _seed_transaction(transaction_name=f"Seed {kind_key} event {event_idx + 1}"):
+                _sentry_logger.debug(
+                    "Seed event started: issue_kind={issue_kind} event_index={event_index} request_id={request_id}",
+                    issue_kind=kind_key,
+                    event_index=event_idx + 1,
+                    request_id=rv["request_id"],
+                    attributes={
+                        "seed_run_id": run_id,
+                        "session_id": rv["session_id"],
+                        "amount_cents": rv["amount_cents"],
+                    },
+                )
                 with sentry_sdk.configure_scope() as scope:
                     scope.fingerprint = fingerprint
                     scope.set_level(level)
@@ -506,6 +578,12 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
                     try:
                         _seed_stack_0(exc_cls, message)
                     except Exception:
+                        _sentry_logger.error(
+                            "Seed event failed: issue_kind={issue_kind} request_id={request_id}",
+                            issue_kind=kind_key,
+                            request_id=rv["request_id"],
+                            attributes={"seed_run_id": run_id, "event_index": event_idx + 1},
+                        )
                         sentry_sdk.capture_exception()
             total_events += 1
         if (issue_idx + 1) % 5 == 0 or issue_idx == 0:
@@ -547,6 +625,15 @@ def main() -> None:
     environments = _get_environments()
     print(f"Using {len(releases)} releases: {', '.join(releases)}")
     print(f"Using {len(environments)} environments: {', '.join(environments)}")
+    if not _logs_enabled:
+        _ver = getattr(sentry_sdk, "VERSION", "?")
+        print(
+            f"Sentry Logs: disabled (this Python has sentry-sdk {_ver}; need >=2.35.0). "
+            f"Python: {sys.executable}"
+        )
+        print("  To enable logs, run with your venv:  .venv/bin/python seed_sentry_issues.py")
+    else:
+        print("Sentry Logs: enabled. View in Sentry: Explore → Logs (or your project’s Logs section).")
 
     if seed_count > 0:
         print(
