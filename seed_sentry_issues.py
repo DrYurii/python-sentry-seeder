@@ -32,6 +32,10 @@ Usage:
   SENTRY_TRACES_SAMPLE_RATE=0 python seed_sentry_issues.py
 
   # Structured logs are sent to Sentry Logs (enable_logs=True). Requires sentry-sdk>=2.35.0.
+
+  # Persistent issues: same few issues get new events every run (fixed fingerprints; no new issues):
+  SEED_PERSISTENT=1 python seed_sentry_issues.py
+  SEED_PERSISTENT=1 SEED_PERSISTENT_EVENTS_PER_RUN=10 python seed_sentry_issues.py
 """
 
 import base64
@@ -45,6 +49,7 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import requests
@@ -105,6 +110,20 @@ _SEED_SPAN_NAMES = (
     "run",
 )
 _SEED_SPAN_SLEEP = 0.005  # small delay so spans have duration in Trace View
+
+
+def _utc_now_iso() -> str:
+    """Current time in UTC, ISO format. Use for log attributes so Sentry display can be verified."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _print_run_start_utc() -> None:
+    """Print run start time (UTC) so users can verify log timestamps vs Sentry UI timezone."""
+    utc = _utc_now_iso()
+    print(
+        f"Run started at UTC: {utc}  "
+        "(Sentry shows log times in your account timezone: User Settings → Account → Timezone)"
+    )
 
 
 def _random_values() -> dict[str, Any]:
@@ -271,9 +290,13 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
         **({"enable_logs": True} if _logs_enabled else {}),
     )
     ev = [0]
+    _print_run_start_utc()
 
     # --- Sentry Logs (structured, queryable). See https://docs.sentry.io/platforms/python/logs ---
-    _sentry_logger.trace("Seed variety run started", attributes={"seed_mode": "variety", "event_count": 0})
+    _sentry_logger.trace(
+        "Seed variety run started",
+        attributes={"seed_mode": "variety", "event_count": 0, "seed_utc": _utc_now_iso()},
+    )
     _sentry_logger.debug("Releases and environments configured", attributes={"release_count": len(releases), "environment_count": len(environments)})
 
     # --- Messages (different levels) ---
@@ -469,6 +492,17 @@ _ISSUE_KINDS: list[tuple[str, type[Exception], str, str]] = [
     ("file-missing", FileNotFoundError, "Optional config file not found", "info"),
 ]
 
+# Persistent issues: fixed fingerprints (no run_id). Every run adds events to the same issues.
+# See https://docs.sentry.io/product/issues/grouping-and-fingerprints
+PERSISTENT_ISSUE_KIND_KEYS: list[str] = [
+    "validation-error",
+    "file-missing",
+    "service-timeout",
+    "connection-refused",
+    "rate-limit",
+    "config-missing",
+]
+
 
 def _raise_bulk_exception(exc_cls: type[Exception], message: str) -> None:
     """Raise an exception so we can capture it. FileNotFoundError has a different signature."""
@@ -530,11 +564,12 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
         **({"enable_logs": True} if _logs_enabled else {}),
     )
     run_id = str(uuid.uuid4())
+    _print_run_start_utc()
     _sentry_logger.info(
         "Seed bulk run started: {issue_count} issues, {events_per_issue} events each",
         issue_count=issue_count,
         events_per_issue=events_per_issue,
-        attributes={"seed_run_id": run_id, "seed_mode": "bulk"},
+        attributes={"seed_run_id": run_id, "seed_mode": "bulk", "seed_utc": _utc_now_iso()},
     )
     kinds = _ISSUE_KINDS
     total_events = 0
@@ -595,6 +630,82 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
     )
 
 
+def seed_persistent_issues(
+    dsn: str,
+    releases: list[str],
+    environments: list[str],
+    events_per_run: int = 5,
+) -> None:
+    """Send events only to a fixed set of issues (same fingerprint every run).
+    Use this to keep a few issues 'going' by adding new events to them on each run.
+    First run creates the issues; subsequent runs add events to the same issues.
+    See https://docs.sentry.io/product/issues/grouping-and-fingerprints
+    """
+    sentry_sdk.init(
+        dsn=dsn,
+        release=releases[0],
+        environment=environments[0],
+        traces_sample_rate=_get_traces_sample_rate(),
+        before_send=_before_send_set_release,
+        **({"enable_logs": True} if _logs_enabled else {}),
+    )
+    _print_run_start_utc()
+    _sentry_logger.debug(
+        "Persistent seed run started",
+        attributes={"seed_mode": "persistent", "seed_utc": _utc_now_iso()},
+    )
+    kind_lookup = {k[0]: k for k in _ISSUE_KINDS}
+    total_events = 0
+    global_event_idx = 0
+    for kind_key in PERSISTENT_ISSUE_KIND_KEYS:
+        if kind_key not in kind_lookup:
+            continue
+        _, exc_cls, msg_tpl, level = kind_lookup[kind_key]
+        # Fixed fingerprint: no run_id → same Issue every time (persistent).
+        fingerprint = ["seed-persistent", kind_key]
+        for event_idx in range(events_per_run):
+            _current_release.set(releases[global_event_idx % len(releases)])
+            _current_environment.set(environments[global_event_idx % len(environments)])
+            global_event_idx += 1
+            rv = _random_values()
+            try:
+                message = msg_tpl.format(**rv)
+            except KeyError:
+                message = msg_tpl
+            with _seed_transaction(transaction_name=f"Seed persistent {kind_key} event {event_idx + 1}"):
+                _sentry_logger.debug(
+                    "Persistent seed event: issue_kind={issue_kind} event_index={event_index}",
+                    issue_kind=kind_key,
+                    event_index=event_idx + 1,
+                    attributes={"seed_mode": "persistent"},
+                )
+                with sentry_sdk.configure_scope() as scope:
+                    scope.fingerprint = fingerprint
+                    scope.set_level(level)
+                    scope.set_extra("event_index", event_idx + 1)
+                    scope.set_extra("events_per_run", events_per_run)
+                    scope.set_tag("seed_persistent", "true")
+                    scope.set_tag("issue_kind", kind_key)
+                    scope.set_tag("priority", level)
+                    for key, value in rv.items():
+                        scope.set_extra(f"random_{key}", value)
+                    try:
+                        _seed_stack_0(exc_cls, message)
+                    except Exception:
+                        _sentry_logger.error(
+                            "Persistent seed event failed: issue_kind={issue_kind}",
+                            issue_kind=kind_key,
+                            attributes={"event_index": event_idx + 1},
+                        )
+                        sentry_sdk.capture_exception()
+            total_events += 1
+    sentry_sdk.flush(timeout=15)
+    print(
+        f"Persistent issues: added {total_events} events to {len(PERSISTENT_ISSUE_KIND_KEYS)} issues "
+        f"({events_per_run} events per issue). Run again to add more events to the same issues."
+    )
+
+
 def main() -> None:
     dsn = os.environ.get("SENTRY_DSN")
     token = os.environ.get("SENTRY_AUTH_TOKEN")
@@ -625,6 +736,20 @@ def main() -> None:
     environments = _get_environments()
     print(f"Using {len(releases)} releases: {', '.join(releases)}")
     print(f"Using {len(environments)} environments: {', '.join(environments)}")
+
+    # Persistent issues: fixed fingerprints; each run only adds events to those same issues.
+    if os.environ.get("SEED_PERSISTENT"):
+        try:
+            events_per_run = int(os.environ.get("SEED_PERSISTENT_EVENTS_PER_RUN", "5"))
+        except ValueError:
+            events_per_run = 5
+        print(
+            f"Persistent mode: adding events to {len(PERSISTENT_ISSUE_KIND_KEYS)} fixed issues "
+            f"({events_per_run} events per issue per run)."
+        )
+        seed_persistent_issues(dsn, releases, environments, events_per_run=events_per_run)
+        return
+
     if not _logs_enabled:
         _ver = getattr(sentry_sdk, "VERSION", "?")
         print(
