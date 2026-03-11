@@ -25,6 +25,8 @@ cp .env.example .env
 
 Optional in `.env`: `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` (for API and create-release); and overrides like `SENTRY_RELEASE`, `SEED_COUNT`, `SEED_PERSISTENT_EVENTS_PER_RUN`.
 
+**Warning:** When you run the scripts, `.env` is loaded and **overrides** any variables you set in the shell with `export`. So if you `export SENTRY_DSN="..."` but `.env` also defines `SENTRY_DSN`, the value from `.env` is used. To use a different DSN for a run, either change `.env` or run the Python script directly without going through the scripts (and ensure `.env` is not loaded elsewhere).
+
 ### One-command scripts
 
 Scripts in **`scripts/`** create the venv (if missing), install deps, load `.env`, and run the right command. From the repo root:
@@ -55,9 +57,18 @@ You can still run the Python scripts directly with env vars. Below is the full r
 
 Using the project DSN is the most reliable option and does not require API permissions on your token.
 
-1. In Sentry: open your **project** → **Project Settings** (gear) → **Client Keys (DSN)**.
-2. Copy the DSN (e.g. `https://abc123...@o123456.ingest.sentry.io/7890123`).
-3. Run:
+**Where to get the DSN (Sentry UI):**
+
+1. Open your **project** (select it in the top bar or sidebar).
+2. Go to **Project Settings**: click the **gear icon** next to the project name (or use the project’s **Settings** entry in the sidebar).
+3. In the left sidebar, under **“SDK Setup”**, click **“Client Keys (DSN)”** (route: `.../settings/.../projects/<project>/keys/`).
+4. On the Client Keys page you’ll see one or more client keys. Each key card shows a **DSN** field with a copyable value (the “DSN URL”). Copy that full URL.
+5. Put it in `.env` as `SENTRY_DSN="https://...@....ingest.sentry.io/..."`.
+
+**Important: events go to the project that owns the DSN’s *public key*, not the project ID in the URL.**  
+Sentry’s ingest (Relay) looks up the project by the **public key** (the part before `@` in the DSN). The number at the end of the DSN (project ID) is not used for routing. So if you use a DSN copied from project A but change the URL to end with project B’s ID, events still go to project A. To seed project 4510828451528704 you must use a DSN that you copied from **that project’s** Client Keys page (that DSN will have a different public key belonging to that project).
+
+Then run:
 
 ```bash
 export SENTRY_DSN="https://YOUR_KEY@oXXXX.ingest.sentry.io/PROJECT_ID"

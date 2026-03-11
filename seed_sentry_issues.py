@@ -94,6 +94,51 @@ except (ImportError, AttributeError):
 _current_release: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_release", default=None)
 # Per-event environment; events are distributed across these.
 _current_environment: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_environment", default=None)
+# Per-event exception enrichment for Feed All (before_send applies these to exception.values[]).
+_current_mechanism_type: contextvars.ContextVar[str] = contextvars.ContextVar("_current_mechanism_type", default="generic")
+_current_mechanism_handled: contextvars.ContextVar[bool] = contextvars.ContextVar("_current_mechanism_handled", default=True)
+_current_main_thread: contextvars.ContextVar[bool] = contextvars.ContextVar("_current_main_thread", default=True)
+
+# Feed All enrichment presets (docs/feed-all-filter-matrix.md, docs/feed-all-seed-enrichment-guide.md).
+# Device context: type required; arch, brand, family, model, model_id, name, locale, orientation, uuid.
+_DEVICE_PRESETS: list[dict[str, Any]] = [
+    {"type": "device", "arch": "arm64", "brand": "Apple", "family": "iPhone", "model": "iPhone15,2", "model_id": "iPhone15,2", "name": "iPhone 15 Pro", "locale": "en_US", "orientation": "portrait"},
+    {"type": "device", "arch": "arm64", "brand": "Samsung", "family": "Galaxy", "model": "SM-S908B", "model_id": "GVU6C", "name": "Galaxy S23 Ultra", "locale": "en_GB", "orientation": "landscape"},
+    {"type": "device", "arch": "x86_64", "brand": "Google", "family": "Pixel", "model": "Pixel 8", "model_id": "sdk_gphone_x86", "name": "Pixel 8", "locale": "de_DE", "orientation": "portrait"},
+]
+# device.class: 1/2/3 (query as low/medium/high); dist: build identifiers.
+_DEVICE_CLASS_VALUES: list[str] = ["1", "2", "3"]
+_DIST_VALUES: list[str] = ["1001", "2001", "beta", "rc1"]
+# App context: in_foreground boolean.
+_APP_PRESETS: list[dict[str, Any]] = [
+    {"type": "app", "in_foreground": True},
+    {"type": "app", "in_foreground": False},
+]
+# Geo: user.geo and/or tags geo.*. Guide: include both user.geo and geo tags across samples.
+_GEO_USER_PRESETS: list[dict[str, str]] = [
+    {"city": "Miami", "country_code": "US", "region": "United States", "subdivision": "Florida"},
+    {"city": "Berlin", "country_code": "DE", "region": "Germany", "subdivision": "Berlin"},
+    {"city": "Recife", "country_code": "BR", "region": "Pernambuco", "subdivision": "Pernambuco"},
+    {"city": "Tokyo", "country_code": "JP", "region": "Tokyo Prefecture", "subdivision": "Tokyo"},
+]
+# Geo tag keys for Feed All (event-level geo filters).
+_TAG_GEO_CITY = "geo.city"
+_TAG_GEO_COUNTRY_CODE = "geo.country_code"
+_TAG_GEO_REGION = "geo.region"
+_TAG_GEO_SUBDIVISION = "geo.subdivision"
+_GEO_TAG_PRESETS: list[dict[str, str]] = [
+    {_TAG_GEO_CITY: "Miami", _TAG_GEO_COUNTRY_CODE: "US", _TAG_GEO_REGION: "United States", _TAG_GEO_SUBDIVISION: "California"},
+    {_TAG_GEO_CITY: "Berlin", _TAG_GEO_COUNTRY_CODE: "DE", _TAG_GEO_REGION: "Germany", _TAG_GEO_SUBDIVISION: "Bayern"},
+    {_TAG_GEO_CITY: "Recife", _TAG_GEO_COUNTRY_CODE: "BR", _TAG_GEO_REGION: "Pernambuco", _TAG_GEO_SUBDIVISION: "Pernambuco"},
+    {_TAG_GEO_CITY: "Tokyo", _TAG_GEO_COUNTRY_CODE: "JP", _TAG_GEO_REGION: "Tokyo Prefecture", _TAG_GEO_SUBDIVISION: "Tokyo"},
+]
+# Exception mechanism: type (generic, onerror, instrument), handled, main_thread.
+_ERROR_MECHANISM_PRESETS: list[tuple[str, bool, bool]] = [
+    ("generic", True, True),
+    ("onerror", False, True),
+    ("instrument", True, False),
+    ("generic", False, False),
+]
 
 # Span names for seed trace (Sentry Tracing: transaction + spans). 10 entries per trace.
 # See https://docs.sentry.io/concepts/key-terms/tracing/
@@ -136,6 +181,40 @@ def _random_values() -> dict[str, Any]:
         "correlation_id": f"{random.getrandbits(32):08x}",
         "session_id": f"sess_{random.getrandbits(48):012x}",
     }
+
+
+def _apply_enrichment_for_event(index: int) -> None:
+    """Apply Feed All enrichment (device, app, geo, tags, exception vars) for the event at given index.
+    Round-robins over presets so different events get different combinations; ensures coverage for filters.
+    """
+    i = index
+    # Device context + tags (device.class, device.family, device.model)
+    device = _DEVICE_PRESETS[i % len(_DEVICE_PRESETS)].copy()
+    device["uuid"] = str(uuid.uuid4())
+    sentry_sdk.set_context("device", device)
+    with sentry_sdk.configure_scope() as scope:
+        scope.set_tag("device.class", _DEVICE_CLASS_VALUES[i % len(_DEVICE_CLASS_VALUES)])
+        scope.set_tag("device.family", device.get("family", ""))
+        scope.set_tag("device.model", device.get("model", ""))
+        scope.set_tag("dist", _DIST_VALUES[i % len(_DIST_VALUES)])
+    # App context
+    sentry_sdk.set_context("app", _APP_PRESETS[i % len(_APP_PRESETS)].copy())
+    # User geo and/or geo tags: vary so some events have only user.geo, some only tags, some both.
+    geo_style = i % 3  # 0: user only, 1: tags only, 2: both
+    if geo_style in (0, 2):
+        sentry_sdk.set_user({"geo": _GEO_USER_PRESETS[i % len(_GEO_USER_PRESETS)].copy()})
+    else:
+        sentry_sdk.set_user(None)
+    if geo_style in (1, 2):
+        with sentry_sdk.configure_scope() as scope:
+            tags = _GEO_TAG_PRESETS[i % len(_GEO_TAG_PRESETS)]
+            for k, v in tags.items():
+                scope.set_tag(k, v)
+    # Exception mechanism (applied in before_send)
+    mech_type, handled, main_thread = _ERROR_MECHANISM_PRESETS[i % len(_ERROR_MECHANISM_PRESETS)]
+    _current_mechanism_type.set(mech_type)
+    _current_mechanism_handled.set(handled)
+    _current_main_thread.set(main_thread)
 
 
 def decode_sentry_token(token: str) -> dict:
@@ -256,27 +335,48 @@ def _seed_transaction(transaction_name: str):
 
 
 def _before_send_set_release(event: dict, hint: dict) -> dict | None:
-    """Set event release and environment from per-event overrides."""
+    """Set event release, environment, and exception mechanism from per-event overrides (Feed All)."""
     release = _current_release.get()
     if release:
         event["release"] = release
     env = _current_environment.get()
     if env:
         event["environment"] = env
+    # Exception enrichment for Feed All: error.handled, error.mechanism, error.main_thread
+    values = event.get("exception") and event["exception"].get("values")
+    if values:
+        mech_type = _current_mechanism_type.get()
+        handled = _current_mechanism_handled.get()
+        main_thread = _current_main_thread.get()
+        for exc_val in values:
+            if isinstance(exc_val, dict):
+                exc_val["mechanism"] = exc_val.get("mechanism") or {}
+                exc_val["mechanism"]["type"] = mech_type
+                exc_val["mechanism"]["handled"] = handled
+                exc_val["main_thread"] = main_thread
     return event
 
 
 def _set_release_and_capture(
     releases: list[str], environments: list[str], event_idx: list[int], level: str | None, message: str | None = None
 ) -> None:
-    """Set current release and environment (round-robin) then capture; for variety seed."""
-    _current_release.set(releases[event_idx[0] % len(releases)])
-    _current_environment.set(environments[event_idx[0] % len(environments)])
+    """Set Feed All enrichment, release, and environment (round-robin) then capture; for variety seed."""
+    idx = event_idx[0]
+    _apply_enrichment_for_event(idx)
+    _current_release.set(releases[idx % len(releases)])
+    _current_environment.set(environments[idx % len(environments)])
     event_idx[0] += 1
     if message is not None:
-        sentry_sdk.capture_message(message, level=level or "info")
+        event_id = sentry_sdk.capture_message(message, level=level or "info")
     else:
-        sentry_sdk.capture_exception()
+        event_id = sentry_sdk.capture_exception()
+    if event_id:
+        print(f"  Sent event: {event_id}")
+    else:
+        print(
+            "  Event dropped (not sent). Check DSN, network, and that before_send does not return None.",
+            file=sys.stderr,
+        )
 
 
 def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
@@ -291,6 +391,15 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
     )
     ev = [0]
     _print_run_start_utc()
+    # Show where events go so you can confirm the project in Sentry (Project Settings → Client Keys).
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(dsn)
+        host = parsed.hostname or parsed.netloc
+        project_id = (parsed.path or "").strip("/").split("/")[0] or "?"
+        print(f"Seeded issues will belong to project ID: {project_id}  (ingest: {host})")
+    except Exception:
+        pass
 
     # --- Sentry Logs (structured, queryable). See https://docs.sentry.io/platforms/python/logs ---
     _sentry_logger.trace(
@@ -466,8 +575,9 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
         except AttributeError:
             _set_release_and_capture(releases, environments, ev, None)
 
+    print("Flushing events to Sentry...")
     sentry_sdk.flush(timeout=5)
-    print("Seeding complete. Check your Sentry project for the new issues.")
+    print("Flush done. Check your Sentry project for the new issues.")
 
 
 # Issue kinds for bulk seeding: (fingerprint_key, exc_type, message_template, level).
@@ -581,6 +691,7 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
         for event_idx in range(events_per_issue):
             _current_release.set(releases[global_event_idx % len(releases)])
             _current_environment.set(environments[global_event_idx % len(environments)])
+            _apply_enrichment_for_event(global_event_idx)
             global_event_idx += 1
             rv = _random_values()
             try:
@@ -666,6 +777,7 @@ def seed_persistent_issues(
         for event_idx in range(events_per_run):
             _current_release.set(releases[global_event_idx % len(releases)])
             _current_environment.set(environments[global_event_idx % len(environments)])
+            _apply_enrichment_for_event(global_event_idx)
             global_event_idx += 1
             rv = _random_values()
             try:
