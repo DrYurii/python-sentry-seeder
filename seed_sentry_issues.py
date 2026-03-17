@@ -132,6 +132,12 @@ _GEO_TAG_PRESETS: list[dict[str, str]] = [
     {_TAG_GEO_CITY: "Recife", _TAG_GEO_COUNTRY_CODE: "BR", _TAG_GEO_REGION: "Pernambuco", _TAG_GEO_SUBDIVISION: "Pernambuco"},
     {_TAG_GEO_CITY: "Tokyo", _TAG_GEO_COUNTRY_CODE: "JP", _TAG_GEO_REGION: "Tokyo Prefecture", _TAG_GEO_SUBDIVISION: "Tokyo"},
 ]
+# User identity: id, email, username — populates user.id, user.email, user.name on logs.
+_USER_IDENTITY_PRESETS: list[dict[str, str]] = [
+    {"id": "usr_001", "email": "alice@example.com", "username": "alice"},
+    {"id": "usr_002", "email": "bob@example.com", "username": "bob"},
+    {"id": "usr_003", "email": "carol@example.com", "username": "carol"},
+]
 # Exception mechanism: type (generic, onerror, instrument), handled, main_thread.
 _ERROR_MECHANISM_PRESETS: list[tuple[str, bool, bool]] = [
     ("generic", True, True),
@@ -199,12 +205,12 @@ def _apply_enrichment_for_event(index: int) -> None:
         scope.set_tag("dist", _DIST_VALUES[i % len(_DIST_VALUES)])
     # App context
     sentry_sdk.set_context("app", _APP_PRESETS[i % len(_APP_PRESETS)].copy())
-    # User geo and/or geo tags: vary so some events have only user.geo, some only tags, some both.
-    geo_style = i % 3  # 0: user only, 1: tags only, 2: both
+    # User identity + geo: merge identity presets with geo data.
+    user_data: dict[str, Any] = _USER_IDENTITY_PRESETS[i % len(_USER_IDENTITY_PRESETS)].copy()
+    geo_style = i % 3  # 0: user+geo, 1: user+tags only, 2: user+geo+tags
     if geo_style in (0, 2):
-        sentry_sdk.set_user({"geo": _GEO_USER_PRESETS[i % len(_GEO_USER_PRESETS)].copy()})
-    else:
-        sentry_sdk.set_user(None)
+        user_data["geo"] = _GEO_USER_PRESETS[i % len(_GEO_USER_PRESETS)].copy()
+    sentry_sdk.set_user(user_data)
     if geo_style in (1, 2):
         with sentry_sdk.configure_scope() as scope:
             tags = _GEO_TAG_PRESETS[i % len(_GEO_TAG_PRESETS)]
@@ -385,6 +391,7 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
         dsn=dsn,
         release=releases[0],
         environment=environments[0],
+        server_name="python-seeder.local",
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
         **({"enable_logs": True} if _logs_enabled else {}),
@@ -669,6 +676,7 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
         dsn=dsn,
         release=releases[0],
         environment=environments[0],
+        server_name="python-seeder.local",
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
         **({"enable_logs": True} if _logs_enabled else {}),
@@ -756,6 +764,7 @@ def seed_persistent_issues(
         dsn=dsn,
         release=releases[0],
         environment=environments[0],
+        server_name="python-seeder.local",
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
         **({"enable_logs": True} if _logs_enabled else {}),
