@@ -5,6 +5,9 @@ Seed various types of issues to a Sentry project.
 Uses SENTRY_AUTH_TOKEN to fetch the project DSN via API, then sends
 multiple exception types and messages to create sample issues.
 
+Enrichment (device, app, geo, os, browser, exception mechanism) and trace span names follow
+docs/python-sentry-expansion-spec.md (§2 Feed All filters / §4.6 Event) for cleaner fetch → Sentinel payloads.
+
 Usage:
   export SENTRY_AUTH_TOKEN="sntrys_..."
   python seed_sentry_issues.py
@@ -99,7 +102,7 @@ _current_mechanism_type: contextvars.ContextVar[str] = contextvars.ContextVar("_
 _current_mechanism_handled: contextvars.ContextVar[bool] = contextvars.ContextVar("_current_mechanism_handled", default=True)
 _current_main_thread: contextvars.ContextVar[bool] = contextvars.ContextVar("_current_main_thread", default=True)
 
-# Feed All enrichment presets (docs/feed-all-filter-matrix.md, docs/feed-all-seed-enrichment-guide.md).
+# Feed All enrichment presets (docs/python-sentry-expansion-spec.md §2, §4.6).
 # Device context: type required; arch, brand, family, model, model_id, name, locale, orientation, uuid.
 _DEVICE_PRESETS: list[dict[str, Any]] = [
     {"type": "device", "arch": "arm64", "brand": "Apple", "family": "iPhone", "model": "iPhone15,2", "model_id": "iPhone15,2", "name": "iPhone 15 Pro", "locale": "en_US", "orientation": "portrait"},
@@ -146,6 +149,31 @@ _ERROR_MECHANISM_PRESETS: list[tuple[str, bool, bool]] = [
     ("generic", False, False),
 ]
 
+# OS / browser contexts for merged Event.contexts after fetch (docs/python-sentry-expansion-spec.md §4.6).
+_OS_PRESETS: list[dict[str, Any]] = [
+    {"type": "os", "name": "iOS", "version": "17.2"},
+    {"type": "os", "name": "Android", "version": "14"},
+    {"type": "os", "name": "macOS", "version": "14.3"},
+]
+_BROWSER_PRESETS: list[dict[str, Any]] = [
+    {"type": "browser", "name": "Safari", "version": "17.2"},
+    {"type": "browser", "name": "Chrome", "version": "120.0"},
+    {"type": "browser", "name": "Chrome Mobile", "version": "120.0"},
+]
+
+# Transaction names: HTTP-style for Sentinel / State API examples (expansion spec §4.6).
+# Span names stay fixed for parity with Sentinel synthetic seed (expansion spec §8).
+_SEED_TRANSACTION_NAME_PRESETS: tuple[str, ...] = (
+    "/api/checkout",
+    "GET /api/v1/users",
+    "POST /api/orders",
+    "POST /api/auth/login",
+    "PUT /api/settings",
+    "DELETE /api/cart/items",
+    "tasks.send_notification",
+    "cron.daily_report",
+)
+
 # Span names for seed trace (Sentry Tracing: transaction + spans). 10 entries per trace.
 # See https://docs.sentry.io/concepts/key-terms/tracing/
 _SEED_SPAN_NAMES = (
@@ -161,6 +189,13 @@ _SEED_SPAN_NAMES = (
     "run",
 )
 _SEED_SPAN_SLEEP = 0.005  # small delay so spans have duration in Trace View
+# Stable server name for seeded events (distinct from production hosts).
+_SEED_SERVER_NAME = "python-seeder.local"
+
+
+def _variety_transaction_name(block_index: int) -> str:
+    """Round-robin HTTP/job-style transaction names (docs/python-sentry-expansion-spec.md §4.6)."""
+    return _SEED_TRANSACTION_NAME_PRESETS[block_index % len(_SEED_TRANSACTION_NAME_PRESETS)]
 
 
 def _utc_now_iso() -> str:
@@ -205,6 +240,9 @@ def _apply_enrichment_for_event(index: int) -> None:
         scope.set_tag("dist", _DIST_VALUES[i % len(_DIST_VALUES)])
     # App context
     sentry_sdk.set_context("app", _APP_PRESETS[i % len(_APP_PRESETS)].copy())
+    # OS + browser (expansion spec §4.6 — merged into Event.contexts on fetch)
+    sentry_sdk.set_context("os", _OS_PRESETS[i % len(_OS_PRESETS)].copy())
+    sentry_sdk.set_context("browser", _BROWSER_PRESETS[i % len(_BROWSER_PRESETS)].copy())
     # User identity + geo: merge identity presets with geo data.
     user_data: dict[str, Any] = _USER_IDENTITY_PRESETS[i % len(_USER_IDENTITY_PRESETS)].copy()
     geo_style = i % 3  # 0: user+geo, 1: user+tags only, 2: user+geo+tags
@@ -330,6 +368,7 @@ def _seed_transaction(transaction_name: str):
     """
     Run code inside a Sentry transaction with child spans so seeded events have trace data.
     Errors captured inside the 'execute' span are linked to this trace (Trace View in Sentry).
+    Transaction name is used as Event.transaction when fetched (see docs/python-sentry-expansion-spec.md §4.6).
     See https://docs.sentry.io/concepts/key-terms/tracing/
     """
     with sentry_sdk.start_transaction(op="seed.task", name=transaction_name):
@@ -391,12 +430,19 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
         dsn=dsn,
         release=releases[0],
         environment=environments[0],
-        server_name="python-seeder.local",
+        server_name=_SEED_SERVER_NAME,
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
         **({"enable_logs": True} if _logs_enabled else {}),
     )
     ev = [0]
+    _variety_tx_block = [0]
+
+    def _vtx() -> str:
+        i = _variety_tx_block[0]
+        _variety_tx_block[0] += 1
+        return _variety_transaction_name(i)
+
     _print_run_start_utc()
     # Show where events go so you can confirm the project in Sentry (Project Settings → Client Keys).
     try:
@@ -416,63 +462,63 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
     _sentry_logger.debug("Releases and environments configured", attributes={"release_count": len(releases), "environment_count": len(environments)})
 
     # --- Messages (different levels) ---
-    with _seed_transaction("Seed: Info message"):
+    with _seed_transaction(_vtx()):
         _sentry_logger.info("Seed message: info level")
         _set_release_and_capture(releases, environments, ev, "info", "Seed: Info message")
-    with _seed_transaction("Seed: Warning message"):
+    with _seed_transaction(_vtx()):
         _sentry_logger.warning("Seed message: warning level", attributes={"seed_level": "warning"})
         _set_release_and_capture(releases, environments, ev, "warning", "Seed: Warning message")
-    with _seed_transaction("Seed: Error message"):
+    with _seed_transaction(_vtx()):
         _set_release_and_capture(releases, environments, ev, "error", "Seed: Error message")
-    with _seed_transaction("Seed: Fatal message"):
+    with _seed_transaction(_vtx()):
         _set_release_and_capture(releases, environments, ev, "fatal", "Seed: Fatal message")
-    with _seed_transaction("Seed: Debug message"):
+    with _seed_transaction(_vtx()):
         _set_release_and_capture(releases, environments, ev, "debug", "Seed: Debug message")
 
     # --- Exceptions (with deep stack: up to 10 frames for Sentry Issue Details) ---
-    with _seed_transaction("Seed: ValueError user_id"):
+    with _seed_transaction(_vtx()):
         try:
             _seed_stack_0(ValueError, "Seed: Invalid value for user_id")
         except ValueError:
             _set_release_and_capture(releases, environments, ev, None)
 
-    with _seed_transaction("Seed: TypeError"):
+    with _seed_transaction(_vtx()):
         try:
             raise TypeError("Seed: expected str, got int")
         except TypeError:
             _set_release_and_capture(releases, environments, ev, None)
 
-    with _seed_transaction("Seed: KeyError config"):
+    with _seed_transaction(_vtx()):
         try:
             raise KeyError("Seed: missing key 'config'")
         except KeyError:
             _set_release_and_capture(releases, environments, ev, None)
 
-    with _seed_transaction("Seed: RuntimeError unavailable"):
+    with _seed_transaction(_vtx()):
         try:
             raise RuntimeError("Seed: service unavailable")
         except RuntimeError:
             _set_release_and_capture(releases, environments, ev, None)
 
-    with _seed_transaction("Seed: ZeroDivisionError"):
+    with _seed_transaction(_vtx()):
         try:
             _ = 1 / 0
         except ZeroDivisionError:
             _set_release_and_capture(releases, environments, ev, None)
 
-    with _seed_transaction("Seed: FileNotFoundError"):
+    with _seed_transaction(_vtx()):
         try:
             raise FileNotFoundError(2, "No such file", "/tmp/seed-missing.txt")
         except FileNotFoundError:
             _set_release_and_capture(releases, environments, ev, None)
 
-    with _seed_transaction("Seed: ConnectionError"):
+    with _seed_transaction(_vtx()):
         try:
             raise ConnectionError("Seed: failed to connect to database")
         except ConnectionError:
             _set_release_and_capture(releases, environments, ev, None)
 
-    with _seed_transaction("Seed: PermissionError"):
+    with _seed_transaction(_vtx()):
         try:
             raise PermissionError(13, "Permission denied", "/etc/shadow")
         except PermissionError:
@@ -481,14 +527,14 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
     # --- With breadcrumbs ---
     sentry_sdk.add_breadcrumb(category="auth", message="User login attempt", level="info")
     sentry_sdk.add_breadcrumb(category="http", message="GET /api/users", level="info")
-    with _seed_transaction("Seed: Auth failed after login"):
+    with _seed_transaction(_vtx()):
         try:
             raise ValueError("Seed: Auth failed after login attempt")
         except ValueError:
             _set_release_and_capture(releases, environments, ev, None)
 
     # --- With extra context ---
-    with _seed_transaction("Seed: Payment gateway timeout"):
+    with _seed_transaction(_vtx()):
         with sentry_sdk.configure_scope() as scope:
             scope.set_tag("seed", "true")
             scope.set_tag("feature", "checkout")
@@ -522,7 +568,7 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
             f"Seed: Charge failed for request {request_id} (user={user_id}, amount={amount_cents}, payload={payload})"
         )
 
-    with _seed_transaction("Seed: Charge failed (random values)"):
+    with _seed_transaction(_vtx()):
         _sentry_logger.info(
             "Checkout attempt for request {request_id} user {user_id} amount_cents {amount_cents}",
             request_id=rv["request_id"],
@@ -552,7 +598,7 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
     print("Random values sent (check in Sentry: Additional Data + stack Local Variables):", rv)
 
     # --- Chained exception (Python 3) ---
-    with _seed_transaction("Seed: Chained RuntimeError from OSError"):
+    with _seed_transaction(_vtx()):
         try:
             try:
                 raise OSError(111, "Connection refused")
@@ -562,21 +608,21 @@ def seed_issues(dsn: str, releases: list[str], environments: list[str]) -> None:
             _set_release_and_capture(releases, environments, ev, None)
 
     # --- AssertionError ---
-    with _seed_transaction("Seed: AssertionError"):
+    with _seed_transaction(_vtx()):
         try:
             assert False, "Seed: Assertion failed in validation"
         except AssertionError:
             _set_release_and_capture(releases, environments, ev, None)
 
     # --- IndexError ---
-    with _seed_transaction("Seed: IndexError"):
+    with _seed_transaction(_vtx()):
         try:
             [1, 2, 3][10]
         except IndexError:
             _set_release_and_capture(releases, environments, ev, None)
 
     # --- AttributeError ---
-    with _seed_transaction("Seed: AttributeError"):
+    with _seed_transaction(_vtx()):
         try:
             (None).missing_attr
         except AttributeError:
@@ -676,7 +722,7 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
         dsn=dsn,
         release=releases[0],
         environment=environments[0],
-        server_name="python-seeder.local",
+        server_name=_SEED_SERVER_NAME,
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
         **({"enable_logs": True} if _logs_enabled else {}),
@@ -706,7 +752,7 @@ def seed_bulk_issues(dsn: str, issue_count: int, events_per_issue: int, releases
                 message = msg_tpl.format(**rv)
             except KeyError:
                 message = msg_tpl
-            with _seed_transaction(transaction_name=f"Seed {kind_key} event {event_idx + 1}"):
+            with _seed_transaction(transaction_name=f"/api/seed/{kind_key}"):
                 _sentry_logger.debug(
                     "Seed event started: issue_kind={issue_kind} event_index={event_index} request_id={request_id}",
                     issue_kind=kind_key,
@@ -764,7 +810,7 @@ def seed_persistent_issues(
         dsn=dsn,
         release=releases[0],
         environment=environments[0],
-        server_name="python-seeder.local",
+        server_name=_SEED_SERVER_NAME,
         traces_sample_rate=_get_traces_sample_rate(),
         before_send=_before_send_set_release,
         **({"enable_logs": True} if _logs_enabled else {}),
@@ -793,7 +839,7 @@ def seed_persistent_issues(
                 message = msg_tpl.format(**rv)
             except KeyError:
                 message = msg_tpl
-            with _seed_transaction(transaction_name=f"Seed persistent {kind_key} event {event_idx + 1}"):
+            with _seed_transaction(transaction_name=f"/api/persistent/{kind_key}"):
                 _sentry_logger.debug(
                     "Persistent seed event: issue_kind={issue_kind} event_index={event_index}",
                     issue_kind=kind_key,
